@@ -1,0 +1,315 @@
+/**
+ * dsh-table-studio — 编辑器页样式。
+ *
+ * 这个页面跑在右侧画布的 iframe 里，尺寸由 DSH 决定；所以一律用
+ * 100% 高度 + 自身滚动，不假设视口。颜色全走 `--ts-*`，由父页面把
+ * DSH 主题令牌算好后 postMessage 过来（见 editor.js 的 theme 消息），
+ * 下面只是浅色兜底值。
+ *
+ * 布局目标只有一句话：看起来就是 Excel —— 顶栏是文档名，下面整块交给
+ * fortune-sheet 自带的工具条 / 公式栏 / 表头 / 工作表标签，纸面永远白。
+ */
+
+:root {
+  --ts-bg: #ffffff;
+  --ts-surface: #f7f8fa;
+  --ts-fg: #1f2329;
+  --ts-muted: #646a73;
+  --ts-line: #e5e6eb;
+  --ts-accent: #4d6bfe;
+  --ts-accent-weak: rgba(77, 107, 254, 0.12);
+  --ts-header: #f2f3f5;
+  --ts-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--ts-bg);
+  color: var(--ts-fg);
+  font-family: var(--ts-font);
+  font-size: 12px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── 顶栏：只放文档名与文档级动作（像 Excel 的标题栏） ─────────────────── */
+
+.ts-bar {
+  display: flex;
+  /* 顶栏是「文档名 + 文档级动作」的最后一道防线：任何浮层都不许把它盖住，
+     也不许表格区的裁切把它挤没（真机上「头被挡住」的观感就出在这一层）。 */
+  position: relative;
+  z-index: 5;
+  flex: 0 0 auto;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 34px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--ts-line);
+  background: var(--ts-surface);
+}
+
+.ts-bar-main {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  flex: 1 1 140px;
+}
+
+.ts-title {
+  min-width: 0;
+  width: 100%;
+  max-width: 320px;
+  padding: 2px 6px;
+  /* 输入框本身不折行，但没有 ellipsis 就是硬切——标题长一点就被切成半个字，
+     真机上看着像「字挤在一起」。加 ellipsis，Chrome 会在未聚焦时给三点省略号。 */
+  text-overflow: ellipsis;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ts-fg);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ts-title:hover {
+  border-color: var(--ts-line);
+  background: var(--ts-bg);
+}
+
+.ts-title:focus {
+  outline: none;
+  border-color: var(--ts-accent);
+  background: var(--ts-bg);
+}
+
+.ts-shape {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid var(--ts-line);
+  border-radius: 999px;
+  background: var(--ts-bg);
+  color: var(--ts-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.ts-bar-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.ts-btn {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--ts-line);
+  border-radius: 4px;
+  background: var(--ts-bg);
+  color: var(--ts-fg);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 24px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.ts-btn:hover {
+  background: var(--ts-header);
+}
+
+.ts-btn:active {
+  transform: translateY(0.5px);
+}
+
+.ts-btn-primary {
+  border-color: transparent;
+  background: var(--ts-accent, #4d6bfe);
+  /* 深色主题的品牌色偏浅，白字会糊成一片白块——前景色由父页面按亮度算好送进来。 */
+  color: var(--ts-on-accent, #ffffff);
+}
+
+.ts-btn-primary:hover {
+  filter: brightness(1.06);
+  background: var(--ts-accent, #4d6bfe);
+}
+
+.ts-status {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  border-top: 1px solid var(--ts-line);
+  background: var(--ts-surface);
+  color: var(--ts-muted);
+  font-size: 11px;
+  line-height: 16px;
+  min-height: 22px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ts-status[data-tone='error'] {
+  color: #d93026;
+}
+
+.ts-status[data-tone='ok'] {
+  color: #1f8a52;
+}
+
+/* ── 表格区：整块交给 fortune-sheet，纸面永远白 ─────────────────────────── */
+
+.ts-sheet {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+  background: #ffffff;
+}
+
+.ts-fortune {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: #ffffff;
+  overflow: hidden;
+  /* fortune 的 chrome（工具条 / 公式栏 / 工作表标签）是写死的浅色底；
+     深色主题下 body 的浅色字会被继承进去，浅底浅字直接看不见。
+     表格区一律按「纸」处理：深字、浅色滚动条，跟 Excel 一致。 */
+  color: #1f2329;
+  color-scheme: light;
+}
+
+.ts-fortune .fortune-container {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* 工具条不要设 overflow（哪怕只是 auto/hidden）：fortune 的下拉菜单是它的
+   绝对定位子元素，一旦工具条成为滚动容器，字体/字号/对齐这些面板会被整块裁掉。
+   窄画布时 fortune 自己会折叠进「⋯」更多菜单，不需要横向滚动条。 */
+/* fortune 自带的是系统滚动条，白底上一根粗灰条很扎眼，换成细的。 */
+.ts-fortune *::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.ts-fortune *::-webkit-scrollbar-thumb {
+  border: 3px solid #ffffff;
+  border-radius: 8px;
+  background-color: #c9ccd1;
+  background-clip: content-box;
+}
+
+.ts-fortune *::-webkit-scrollbar-thumb:hover {
+  background-color: #a8adb5;
+}
+
+.ts-fortune *::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.ts-fortune *::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* fortune 的「添加 N 行（在底部添加）/ 回到顶部」悬浮控制条：Excel 不单独摆
+   这一排，增删行列走右键菜单（插入行 / 插入列）与行列头操作，直接就地加。
+   它是 position:absolute 浮在网格底部的，留着只会盖住最后几行视线。 */
+#luckysheet-bottom-controll-row,
+.luckysheet-bottom-controll-row {
+  display: none !important;
+}
+
+/* fortune 的 canvas 比容器少算一小截，把容器本身铺白，缝就看不出来了。 */
+.ts-sheet-fortune {
+  background: #ffffff !important;
+}
+
+.ts-empty {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  color: var(--ts-muted);
+  font-size: 12px;
+}
+
+/* 滚动条细一点，和侧栏一致（退路 jspreadsheet 的滚动容器不止一个，统一管）。 */
+.ts-sheet *::-webkit-scrollbar,
+.ts-sheet::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+.ts-sheet *::-webkit-scrollbar-thumb,
+.ts-sheet::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background-clip: content-box;
+  background-color: rgba(127, 127, 127, 0.32);
+}
+
+.ts-sheet *::-webkit-scrollbar-thumb:hover,
+.ts-sheet::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(127, 127, 127, 0.5);
+}
+
+.ts-sheet *::-webkit-scrollbar-track,
+.ts-sheet::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.ts-sheet *::-webkit-scrollbar-corner,
+.ts-sheet::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ── 崩溃兜底面版：网格渲染出错时顶上来，绝不给用户一块白板 ─────────────── */
+
+.ts-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: center;
+  height: 100%;
+  padding: 24px 28px;
+  background: var(--ts-bg);
+  color: var(--ts-fg);
+}
+
+.ts-fallback-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ts-fallback-text {
+  max-width: 560px;
+  color: var(--ts-muted);
+  line-height: 1.7;
+}
+
+.ts-fallback-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}

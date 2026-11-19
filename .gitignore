@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+
+# 打包产物
+*.tgz
+*.tar.gz
+
+# 本地临时目录：调试脚本、备份与预览，只在本地留档
+.tmp/
+
+# 本地分析稿 / 真机截图：不随仓库与发布包外流
+ANALYSIS-*.md
+screenshots/
+preview/
+*.local.*
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log

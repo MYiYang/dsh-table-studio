@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN" data-dsh-plugin="dsh-table-studio">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>表格编辑器</title>
+    <!-- 本地绑定：fortune-sheet（MIT）打头，jspreadsheet CE 5.0.4（MIT）
+         + jSuites 5.12（MIT）+ formula（MIT）作退路。全部随包分发，任何一处都不走 CDN。 -->
+    <link rel="stylesheet" href="/dsh-table-studio/assets/jsuites.css" />
+    <link rel="stylesheet" href="/dsh-table-studio/assets/jspreadsheet.css" />
+    <link rel="stylesheet" href="/dsh-table-studio/assets/fortune.css?v=20261120" />
+    <link rel="stylesheet" href="/dsh-table-studio/assets/editor.css" />
+  </head>
+  <body>
+    <!-- 顶栏只留「这份文档是谁」与文档级动作；格式、公式、多表这些
+         编辑动作交给下面的 Excel 工具条，不再自己造一套小按钮。 -->
+    <header class="ts-bar">
+      <div class="ts-bar-main">
+        <input id="ts-title" class="ts-title" type="text" value="表格" aria-label="表格标题" spellcheck="false" />
+        <span id="ts-shape" class="ts-shape">—</span>
+      </div>
+      <div class="ts-bar-actions">
+        <button id="ts-copy" class="ts-btn" type="button" title="复制整表（制表符分隔，可直接粘到 Excel）">复制</button>
+        <button id="ts-download" class="ts-btn" type="button" title="下载为 CSV：直接存到默认下载目录，不再弹「另存为」">下载</button>
+        <button id="ts-save" class="ts-btn ts-btn-primary" type="button" title="保存（Ctrl+S）">保存</button>
+      </div>
+    </header>
+    <main id="ts-sheet" class="ts-sheet"></main>
+    <footer id="ts-status" class="ts-status" role="status" aria-live="polite">正在载入…</footer>
+    <script src="/dsh-table-studio/assets/fortune.js?v=20261120"></script>
+    <script src="/dsh-table-studio/assets/jsuites.js"></script>
+    <script src="/dsh-table-studio/assets/formula.js"></script>
+    <script src="/dsh-table-studio/assets/jspreadsheet.js"></script>
+    <script src="/dsh-table-studio/assets/editor.js"></script>
+  </body>
+</html>

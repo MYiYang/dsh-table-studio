@@ -1,0 +1,59 @@
+{
+  "name": "dsh-table-studio",
+  "version": "0.5.9",
+  "description": "Table studio for DeepSeek Harness: a conversation table card (copy / CSV download / expand) plus a right-side Excel-style spreadsheet editor bound locally to fortune-sheet (toolbar, formula bar, sheet tabs) with a jspreadsheet fallback, downloads saved straight to the default Downloads folder — no CDN, everything shipped in the package.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/",
+    "skills/",
+    "assets/editor.html",
+    "assets/editor.js",
+    "assets/editor.css",
+    "assets/jspreadsheet.js",
+    "assets/jspreadsheet.css",
+    "assets/jsuites.js",
+    "assets/jsuites.css",
+    "assets/formula.js",
+    "cordis.patch.yml",
+    "README.md",
+    "THIRD-PARTY-LICENSES.md",
+    "LICENSE",
+    "assets/fortune.js",
+    "assets/fortune.css"
+  ],
+  "author": "MYiYang <1791500400@qq.com>",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "table",
+    "spreadsheet",
+    "csv",
+    "jspreadsheet"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --check client.js && node test/fortune.csp.test.js && node test/csv.test.js && node test/model.test.js && node test/store.test.js && node test/policy.test.js && node test/host.test.js && node test/client.test.js && node test/editor.logic.test.js && node test/editor.dom.test.js"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

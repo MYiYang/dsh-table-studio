@@ -1,0 +1,12 @@
+# dsh-table-studio bundle patch.
+#
+# Mounts the Host half: five model-facing `table_*` tools, the editor page and
+# its locally-bound spreadsheet assets under `/dsh-table-studio/`, and the
+# document API the right-side canvas talks to.
+#
+# The package's `dsh.client` declaration makes the Web carrier serve client.js
+# (the conversation card + the right-side editor tab), so this patch needs no
+# extra UI row.
+- insert:
+    - id: dsh-table-studio
+      name: 'dsh-table-studio'
