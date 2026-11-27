@@ -266,6 +266,116 @@ test('opener 没有 controller 时返回 false', () => {
   assert.equal(opener({ docId: 'tbl_1' }), false)
 })
 
+test('opener 带 docId 时走资源地址：一表一 tab', () => {
+  const calls = []
+  const controller = {
+    expand() { calls.push('expand') },
+    mounted: { getSnapshot: () => 'session-a' },
+    openResource(address, options) { calls.push(`openResource:${address}:${JSON.stringify(options?.params ?? null)}`) },
+    openTab(kind) { calls.push(`openTab:${kind}`) },
+  }
+  const opener = internals.makeOpener({ get: () => controller }, 'session-a')
+  assert.equal(opener({ docId: 'tbl_1', title: '处罚明细' }), true)
+  assert.deepEqual(plain(calls), ['expand', 'openResource:dsh-resource://dsh-table-studio/tbl_1:{"docId":"tbl_1"}'])
+  assert.equal(internals.tabTitleOf('dsh-resource://dsh-table-studio/tbl_1'), '处罚明细')
+})
+
+test('opener 两次打开同一张表仍是同一个地址', () => {
+  const addresses = []
+  const controller = {
+    openResource(address) { addresses.push(address) },
+    openTab() { addresses.push('page-tab') },
+  }
+  const opener = internals.makeOpener({ get: () => controller }, 'session-a')
+  opener({ docId: 'tbl_same' })
+  opener({ docId: 'tbl_same' })
+  assert.equal(new Set(addresses).size, 1)
+  assert.deepEqual(plain(addresses), [
+    'dsh-resource://dsh-table-studio/tbl_same',
+    'dsh-resource://dsh-table-studio/tbl_same',
+  ])
+})
+
+test('opener 两张不同的表开出两个地址', () => {
+  const addresses = []
+  const controller = { openResource(address) { addresses.push(address) } }
+  const opener = internals.makeOpener({ get: () => controller }, 'session-a')
+  opener({ docId: 'tbl_a' })
+  opener({ docId: 'tbl_b' })
+  assert.equal(new Set(addresses).size, 2)
+})
+
+test('opener 会话不匹配时用 openResourceIn 指到本会话', () => {
+  const calls = []
+  const controller = {
+    expand() { calls.push('expand') },
+    mounted: { getSnapshot: () => 'session-b' },
+    openResource() { calls.push('openResource:wrong-session') },
+    openResourceIn(sessionId, address, options) { calls.push(`openResourceIn:${sessionId}:${address}:${JSON.stringify(options?.params ?? null)}`) },
+  }
+  const opener = internals.makeOpener({ get: () => controller }, 'session-a')
+  assert.equal(opener({ docId: 'tbl_9' }), true)
+  assert.deepEqual(plain(calls), ['expand', 'openResourceIn:session-a:dsh-resource://dsh-table-studio/tbl_9:{"docId":"tbl_9"}'])
+})
+
+test('opener 资源地址抛错时退回页面 tab', () => {
+  const calls = []
+  const controller = {
+    openResource() { throw new Error('no type claims this address') },
+    openTab(kind) { calls.push(`openTab:${kind}`) },
+  }
+  const opener = internals.makeOpener({ get: () => controller }, 'session-a')
+  assert.equal(opener({ docId: 'tbl_3' }), true)
+  assert.deepEqual(plain(calls), ['openTab:table-studio-editor'])
+})
+
+test('docIdOfAddress 只认本插件的资源地址', () => {
+  assert.equal(internals.docIdOfAddress('dsh-resource://dsh-table-studio/tbl_a'), 'tbl_a')
+  assert.equal(internals.docIdOfAddress('dsh-resource://dsh-table-studio/tbl%20a'), 'tbl a')
+  assert.equal(internals.docIdOfAddress('dsh-resource://file/session/x/notes.md'), '')
+  assert.equal(internals.docIdOfAddress('sidebar://table-studio-editor'), '')
+  assert.equal(internals.docIdOfAddress(''), '')
+  assert.equal(internals.docIdOfAddress(undefined), '')
+  assert.equal(internals.addressOfDoc('tbl a'), 'dsh-resource://dsh-table-studio/tbl%20a')
+})
+
+test('tabCountOf 只数本插件在会话里的 tab', () => {
+  const controller = {
+    tabsIn(sessionId) {
+      return sessionId === 'session-a'
+        ? [{ kind: 'table-studio-editor' }, { kind: 'table-studio-editor' }, { kind: 'text' }]
+        : []
+    },
+  }
+  assert.equal(internals.tabCountOf(controller, 'session-a'), 2)
+  assert.equal(internals.tabCountOf(controller, 'session-b'), 0)
+  assert.equal(internals.tabCountOf({}, 'session-a'), undefined)
+  assert.equal(internals.tabCountOf(controller, ''), undefined)
+  const throwing = { tabsIn() { throw new Error('boom') } }
+  assert.equal(internals.tabCountOf(throwing, 'session-a'), undefined)
+})
+
+test('TabTitle 用表名，认不出表时退「表格」', () => {
+  internals.rememberDocTitle('tbl_titled', '穴位对照')
+  const named = internals.TabTitle({ useTabInfo: () => ({ tab: { contentId: 'dsh-resource://dsh-table-studio/tbl_titled' } }) })
+  assert.equal(named.props.children, '穴位对照')
+  assert.equal(named.props.title, '穴位对照')
+  const page = internals.TabTitle({ useTabInfo: () => ({ tab: { contentId: 'sidebar://table-studio-editor' } }) })
+  assert.equal(page.props.children, '表格')
+  const bare = internals.TabTitle({})
+  assert.equal(bare.props.children, '表格')
+})
+
+test('宽表靠表体横向滚动，列不再压成省略号', () => {
+  const css = internals.CSS
+  assert.match(css, /\.tst-body \{[\s\S]*?overflow: auto/)
+  assert.match(css, /\.tst-body::-webkit-scrollbar[\s\S]*?\{[^}]*height: 10px/)
+  assert.match(css, /\.tst-card \.tst-table \{[^}]*table-layout: auto[^}]*width: max-content/)
+  assert.match(css, /\.tst-card \.tst-table th,[\s\S]*?min-width: 96px/)
+  assert.match(css, /\.tst-preview-body \.tst-table \{[^}]*width: max-content/)
+  assert.doesNotMatch(css, /\.tst-card \.tst-table \{ table-layout: fixed/)
+})
+
 test('readPalette 在无样式环境也给出兜底色', () => {
   const palette = internals.readPalette()
   assert.match(palette.bg, /^#|rgb/)

@@ -35,8 +35,17 @@ window.__ModuleLoader__.load({
     const TAB_ID = 'dsh-table-studio/editor'
     /** 传给 sidebarRight.openTab 的 kind。 */
     const TAB_KIND = 'table-studio-editor'
+    /**
+     * 表在右栏里的资源地址前缀。
+     *
+     * 用资源地址（`dsh-resource://<type>/<id>`）而不是页面地址：右栏的页面类型
+     * 一个窗格里只认一个（再开只做 reveal），于是第二张表会把第一张顶掉；
+     * 资源按地址辨识内容，一个 docId 一个地址，天然一表一 tab，重复打开同一张
+     * 表也只是把那个 tab 激活。刷新后 contentId 还在，编辑器据此还原是哪张表。
+     */
+    const TAB_SCHEME = 'dsh-resource://dsh-table-studio'
     /** 客户端版本：刷新页面后看一眼就知道跑的是哪一版。 */
-    const CLIENT_VERSION = '0.5.9'
+    const CLIENT_VERSION = '0.5.10'
     /**
      * `react-dom`：只为了 `createPortal`。放大预览是 `position: fixed` 的整屏浮层，
      * 可 DSH 的对话 / 侧栏容器带 overflow 与 transform；留在卡片里画，浮层会被那个
@@ -612,10 +621,40 @@ window.__ModuleLoader__.load({
 }
 .tst-icon-btn:hover { background: var(--tst-hover); color: var(--tst-fg); }
 .tst-icon-btn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe); outline-offset: 1px; }
-.tst-body { max-height: 420px; overflow: auto; }
+/* 表体是唯一滚动容器：列多时横向出条、行多时纵向出条，两条都在表脚之上。
+   滚动条常显（细条 + 浅色滑块），否则官人根本不知道右边还有几列。 */
+.tst-body {
+  max-height: 420px;
+  overflow: auto;
+  /* Chromium 121+ 认这两个标准属性，会盖过下面的 ::-webkit-scrollbar；
+     颜色给到中灰（别用边框色，那几乎看不见），深浅主题都能辨。 */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(100, 106, 115, 0.5) transparent;
+}
+.tst-preview-body {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(100, 106, 115, 0.5) transparent;
+}
+.tst-body::-webkit-scrollbar,
+.tst-preview-body::-webkit-scrollbar { width: 10px; height: 10px; }
+.tst-body::-webkit-scrollbar-thumb,
+.tst-preview-body::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background: rgba(100, 106, 115, 0.5) padding-box;
+}
+.tst-body::-webkit-scrollbar-thumb:hover,
+.tst-preview-body::-webkit-scrollbar-thumb:hover { background: rgba(100, 106, 115, 0.8) padding-box; }
+.tst-body::-webkit-scrollbar-track,
+.tst-preview-body::-webkit-scrollbar-track,
+.tst-body::-webkit-scrollbar-corner,
+.tst-preview-body::-webkit-scrollbar-corner { background: transparent; }
 .tst-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12px; }
-/* 卡片里的表照参考图等分列宽；预览弹层用自适应，别把长文截断。 */
-.tst-card .tst-table { table-layout: fixed; }
+/* 卡片里的表按内容撑开：每列有下限（不再被压成一条缝），超长内容仍有上限；
+   整表宽过卡片时由 .tst-body 出横向滚动条，而不是把列等分后又截成省略号。 */
+.tst-card .tst-table { table-layout: auto; width: max-content; min-width: 100%; }
+.tst-card .tst-table th,
+.tst-card .tst-table td { min-width: 96px; }
 .tst-table th,
 .tst-table td {
   padding: 10px 14px;
@@ -810,6 +849,10 @@ window.__ModuleLoader__.load({
   line-height: 16px;
 }
 .tst-preview-body { flex: 1 1 auto; overflow: auto; min-height: 0; }
+/* 大图里的表同样按内容撑开：列多就横向滚动，不把十几列挤成一排省略号。 */
+.tst-preview-body .tst-table { table-layout: auto; width: max-content; min-width: 100%; }
+.tst-preview-body .tst-table th,
+.tst-preview-body .tst-table td { min-width: 110px; }
 .tst-table-lg th,
 .tst-table-lg td {
   padding: 9px 14px;
@@ -916,10 +959,14 @@ window.__ModuleLoader__.load({
   cursor: pointer;
 }
 .tst-pane-btn:hover { background: var(--dsw-alias-bg-layer-2, #f6f7f9); }
+/* tab chip 上的字是表名，长短不一：限宽 + 省略号，别把一个长表名顶得整个 tab 变形。 */
 .tst-tab-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+  display: inline-block;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
   font-size: 12px;
   color: inherit;
 }
@@ -1025,6 +1072,87 @@ window.__ModuleLoader__.load({
 
     // ── 会话里的表格卡 ──────────────────────────────────────────────────────
 
+    /**
+     * 一张表在右栏里的地址。
+     * @param {string} docId - 表 id。
+     * @returns {string} 资源地址。
+     */
+    function addressOfDoc(docId) {
+      return `${TAB_SCHEME}/${encodeURIComponent(docId)}`
+    }
+
+    /**
+     * 从右栏 tab 的 contentId 反解出表 id；不是本插件的地址就给空串。
+     * @param {string} address - tab 的 contentId（或导航地址）。
+     * @returns {string} 表 id，认不出为空串。
+     */
+    function docIdOfAddress(address) {
+      const text = typeof address === 'string' ? address : ''
+      const head = `${TAB_SCHEME}/`
+      if (!text.startsWith(head)) return ''
+      const rest = text.slice(head.length).split(/[/?#]/)[0]
+      if (rest === '') return ''
+      try {
+        return decodeURIComponent(rest)
+      } catch {
+        return rest
+      }
+    }
+
+    /**
+     * 表 id → 表名。tab 的标题要同步可读（注册时的 `title(address)` 是同步接口），
+     * 所以卡片一打开就先把表名记在这里；刷新后缓存空了，由 TabTitle 异步补。
+     */
+    const docTitles = new Map()
+    /** 缓存上限：tab 开开关关，别让一张无界表把内存养肥。 */
+    const DOC_TITLES_LIMIT = 256
+
+    /**
+     * 记一条「表 id → 表名」，顺手压掉最老的条目。
+     * @param {string} docId - 表 id。
+     * @param {string} title - 表名。
+     * @returns {void}
+     */
+    function rememberDocTitle(docId, title) {
+      if (typeof docId !== 'string' || docId === '') return
+      if (typeof title !== 'string' || title === '') return
+      if (docTitles.has(docId)) docTitles.delete(docId)
+      docTitles.set(docId, title)
+      while (docTitles.size > DOC_TITLES_LIMIT) {
+        const oldest = docTitles.keys().next().value
+        if (oldest === undefined) break
+        docTitles.delete(oldest)
+      }
+    }
+
+    /**
+     * 一个地址对应的 tab 标题：认得出表就用表名，认不出退回「表格」。
+     * @param {string} address - 资源地址。
+     * @returns {string} tab 标题。
+     */
+    function tabTitleOf(address) {
+      const name = docTitles.get(docIdOfAddress(address))
+      return typeof name === 'string' && name !== '' ? name : '表格'
+    }
+
+    /**
+     * 本插件在某个会话里开着几个 tab：只用于自报（client.json 里看得见），
+     * 侧栏没这个能力时返回 undefined，不硬凑数字。
+     * @param {any} controller - sidebarRight 控制器。
+     * @param {string} sessionId - 会话 id。
+     * @returns {number | undefined} tab 数。
+     */
+    function tabCountOf(controller, sessionId) {
+      if (typeof sessionId !== 'string' || sessionId === '') return undefined
+      try {
+        const tabs = typeof controller?.tabsIn === 'function' ? controller.tabsIn(sessionId) : null
+        if (!Array.isArray(tabs)) return undefined
+        return tabs.filter((tab) => tab?.kind === TAB_KIND).length
+      } catch {
+        return undefined
+      }
+    }
+
     /** 轮末投影的 kind。 */
     const TABLES_KIND = 'table-studio'
     /** 轮末投影已画过的 callId：工具卡据此退成一行，同一张表不该出现两次。 */
@@ -1096,9 +1224,10 @@ window.__ModuleLoader__.load({
      * 刷新时把画布再弹一遍，那就不叫「顺手」了。
      * @param {string} id - 表 id。
      * @param {Function} opener - 打开右栏的函数。
+     * @param {string} [title] - 表名，给 tab 取标题用。
      * @returns {boolean} 这次是否真的去开了。
      */
-    function autoOpenOnce(id, opener) {
+    function autoOpenOnce(id, opener, title = '') {
       if (typeof id !== 'string' || id === '') return false
       if (typeof opener !== 'function') {
         report('open-tab', { note: 'no-opener-prop' })
@@ -1122,7 +1251,7 @@ window.__ModuleLoader__.load({
       }
       let opened = false
       try {
-        opened = opener({ docId: id }) === true
+        opened = opener({ docId: id, title }) === true
       } catch {
         opened = false
       }
@@ -1254,10 +1383,10 @@ window.__ModuleLoader__.load({
         if (!painted) return
         if (props?.autoOpen === true) {
           const opener = resolveOpener()
-          if (opener !== null) opener({ docId: id })
+          if (opener !== null) opener({ docId: id, title })
           return
         }
-        if (props?.autoOpen === 'once') autoOpenOnce(id, resolveOpener())
+        if (props?.autoOpen === 'once') autoOpenOnce(id, resolveOpener(), title)
       }, [painted, id, props?.autoOpen, resolveOpener])
 
       useEffect(() => {
@@ -1348,7 +1477,7 @@ window.__ModuleLoader__.load({
           onDownload: () => saveCsv(false),
           onEdit: () => {
             const opener = resolveOpener()
-            const opened = opener === null ? false : opener({ docId: id })
+            const opened = opener === null ? false : opener({ docId: id, title })
             if (opened === true) setOverlay(false)
             else toast('侧栏没接上，无法打开画布')
           },
@@ -1381,7 +1510,7 @@ window.__ModuleLoader__.load({
               onClick: () => {
                 setNotice(null)
                 const opener = resolveOpener()
-                const opened = opener === null ? false : opener({ docId: id })
+                const opened = opener === null ? false : opener({ docId: id, title })
                 report('open-tab', { note: opened ? 'from-toast' : 'toast-no-sidebar' })
                 // 「查看」= 直接在右侧表格编辑器里看这张表，不再绕预览弹层。
                 if (opened !== true) toast('侧栏没接上，无法打开表格编辑器')
@@ -1662,7 +1791,13 @@ window.__ModuleLoader__.load({
       const params = tabParams(props)
       // 参数对象每帧都是新的（slot 的 hook 返回值不稳定），所以只把里面那个
       // 字符串提出来当依赖——否则 effect 每帧重跑，setPhase 又把帧数推上去，成环。
-      const paramDocId = typeof params?.docId === 'string' ? params.docId : ''
+      //
+      // 表 id 有三条来路，按可信度排：导航参数（刚打开）、tab 的资源地址（刷新后
+      // 参数丢了、contentId 还在）、会话当前表（guide 入口那种没指名表的情况）。
+      const tabContentId = typeof tabInfo?.tab?.contentId === 'string' ? tabInfo.tab.contentId : ''
+      const paramDocId = typeof params?.docId === 'string' && params.docId !== ''
+        ? params.docId
+        : docIdOfAddress(tabContentId)
       const [docId, setDocId] = useState(paramDocId)
       const [phase, setPhase] = useState('loading')
       const [error, setError] = useState('')
@@ -1815,16 +1950,48 @@ window.__ModuleLoader__.load({
     }
 
     /** 右栏 tab 上的标题。 */
-    function TabTitle() {
-      return h('span', { className: 'tst-tab-title' }, '表格')
+    function TabTitle(props) {
+      // 标题槽与 body 槽一样拿得到 useTabInfo：从 tab 的 contentId 认出是哪张表，
+      // 表名先从内存缓存取（卡片打开时记过），取不到再问 host 一次。
+      const tabInfo = typeof props?.useTabInfo === 'function' ? props.useTabInfo() : null
+      const contentId = typeof tabInfo?.tab?.contentId === 'string' ? tabInfo.tab.contentId : ''
+      const docId = docIdOfAddress(contentId)
+      const [name, setName] = useState(() => docTitles.get(docId) ?? '')
+      useEffect(() => {
+        if (docId === '') return undefined
+        if (docTitles.has(docId)) {
+          setName(docTitles.get(docId))
+          return undefined
+        }
+        let alive = true
+        api(`/doc/${encodeURIComponent(docId)}`)
+          .then((result) => {
+            if (!alive) return
+            const title = typeof result?.title === 'string' ? result.title : ''
+            if (title === '') return
+            rememberDocTitle(docId, title)
+            setName(title)
+          })
+          .catch(() => {
+            /* 读不到表名就显示「表格」，不至于把 tab 变成空白 */
+          })
+        return () => {
+          alive = false
+        }
+      }, [docId])
+      const label = typeof name === 'string' && name !== '' ? name : '表格'
+      return h('span', { className: 'tst-tab-title', title: label }, label)
     }
 
     /**
      * 打开右栏 tab，返回是否成功。
      *
      * 顺序照抄内置画布类插件：先 `expand()`（折叠的侧栏收下 openTab 却什么都不显示，
-     * 看起来就像插件坏了），再看当前挂载的会话是不是本会话——是就 `openTab`，
-     * 不是就用 `openTabIn(sessionId, …)`，免得把 tab 开到别的会话上去。
+     * 看起来就像插件坏了），再看当前挂载的会话是不是本会话——是就开在当下，
+     * 不是就用 `…In(sessionId, …)` 指到本会话，免得把 tab 开到别的会话上去。
+     *
+     * 带 docId 时走资源地址（{@link TAB_SCHEME}）：一张表一个 tab，多张表并排看得见，
+     * 重复点同一张只是把它激活。老侧栏没有 `openResource` 才退回页面 tab。
      * @param {any} ctx - client ctx。
      * @param {string} [sessionId] - 本会话 id。
      * @returns {(params?: Record<string, unknown>) => boolean} opener。
@@ -1837,6 +2004,8 @@ window.__ModuleLoader__.load({
           report('open-tab', { note: 'no-sidebarRight' })
           return false
         }
+        const docId = typeof params?.docId === 'string' ? params.docId : ''
+        rememberDocTitle(docId, typeof params?.title === 'string' ? params.title : '')
         const options = params ? { params } : {}
         try {
           if (typeof controller.expand === 'function') controller.expand()
@@ -1844,8 +2013,27 @@ window.__ModuleLoader__.load({
         } catch {
           /* 折叠态展开失败也让下面继续试 */
         }
+        const mounted = typeof controller.mounted?.getSnapshot === 'function' ? controller.mounted.getSnapshot() : undefined
+        // ① 资源地址：一表一 tab
+        if (docId !== '' && typeof controller.openResource === 'function') {
+          const address = addressOfDoc(docId)
+          const resourceOptions = { params: { docId } }
+          try {
+            if (mine !== '' && mounted !== undefined && mounted !== mine && typeof controller.openResourceIn === 'function') {
+              controller.openResourceIn(mine, address, resourceOptions)
+              report('open-tab', { note: `openResourceIn:${address}`, id: docId, count: tabCountOf(controller, mine) })
+              return true
+            }
+            controller.openResource(address, resourceOptions)
+            report('open-tab', { note: `openResource:${address}`, id: docId, count: tabCountOf(controller, mine) })
+            return true
+          } catch (error) {
+            // 类型没认领这个地址（老侧栏 / 注册失败）时退回页面 tab，别把入口弄死。
+            report('open-tab', { note: `resource-threw:${String(error?.message ?? error).slice(0, 100)}` })
+          }
+        }
+        // ② 页面 tab：老侧栏，或没有 docId（guide 入口 / 会话当前表）
         try {
-          const mounted = typeof controller.mounted?.getSnapshot === 'function' ? controller.mounted.getSnapshot() : undefined
           if (mine !== '' && mounted !== undefined && mounted === mine && typeof controller.openTab === 'function') {
             controller.openTab(TAB_KIND, options)
             report('open-tab', { note: 'openTab-mine' })
@@ -1893,11 +2081,15 @@ window.__ModuleLoader__.load({
       }, 'table-studio: stylesheet')
 
       // ② tab 类型
+      //
+      // `patterns` 把本类型挂到资源地址上（一表一地址、一表一 tab）；`title` 是同步
+      // 接口，表名从卡片打开时记下的缓存里取，认不出就退「表格」，标题槽再异步补全。
       ctx.effect(() => ctx.sidebarRightTabs.register({
         id: TAB_ID,
         kind: TAB_KIND,
         priority: 'extension',
-        title: () => '表格',
+        patterns: [`${TAB_SCHEME}/**`],
+        title: (address) => tabTitleOf(address),
         guide: [{
           id: 'table-studio',
           order: 64,
@@ -2028,6 +2220,12 @@ window.__ModuleLoader__.load({
         saveFileSilently,
         savedHint,
         makeOpener,
+        addressOfDoc,
+        docIdOfAddress,
+        tabTitleOf,
+        rememberDocTitle,
+        tabCountOf,
+        docTitles,
         readPalette,
         CLIENT_VERSION,
         TAB_ID,
