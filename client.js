@@ -45,7 +45,7 @@ window.__ModuleLoader__.load({
      */
     const TAB_SCHEME = 'dsh-resource://dsh-table-studio'
     /** 客户端版本：刷新页面后看一眼就知道跑的是哪一版。 */
-    const CLIENT_VERSION = '0.5.10'
+    const CLIENT_VERSION = '0.5.13'
     /**
      * `react-dom`：只为了 `createPortal`。放大预览是 `position: fixed` 的整屏浮层，
      * 可 DSH 的对话 / 侧栏容器带 overflow 与 transform；留在卡片里画，浮层会被那个
@@ -1135,6 +1135,53 @@ window.__ModuleLoader__.load({
       return typeof name === 'string' && name !== '' ? name : '表格'
     }
 
+    /** 控制器打哪儿取来的（只报一次）：`prop` / `reflect` / `get`，带 `:no-openResource` 说明那一边没有资源接口。 */
+    let sidebarProbe = ''
+    /** 来路是否已经报过，别每次点「在画布里编辑」都往 client.json 刷一条。 */
+    let sidebarProbeSent = false
+
+    /**
+     * 取右栏控制器（`ctx.sidebarRight`）。
+     *
+     * 三条路按可信度排：属性直读（内置插件都这么用，拿到的是完整控制器，
+     * 带 `openResource`）、`ctx.reflect.get`、最后才是 `ctx.get`。
+     *
+     * 踩过的坑：某些宿主给外部插件的 ctx 是个受限门面，`ctx.get('sidebarRight')`
+     * 只回 `openTab` / `mounted` 这一层，没有 `openResource`。一路走下来就退成
+     * 「一个会话一个页面 tab」——多张表共用一个 tab，后点的把先点的顶掉，右栏
+     * 永远只剩最后一张。所以先读属性，门面只作兜底。
+     * @param {any} ctx - client ctx。
+     * @returns {any} 带 `openTab` 或 `openResource` 的控制器，取不到为 undefined。
+     */
+    function sidebarOf(ctx) {
+      if (!ctx) return undefined
+      const readable = (value) => (value && typeof value === 'object'
+        && (typeof value.openTab === 'function' || typeof value.openResource === 'function')
+        ? value
+        : undefined)
+      const probes = [
+        ['prop', () => ctx.sidebarRight],
+        ['reflect', () => ctx.reflect?.get?.('sidebarRight', false)],
+        ['get', () => (typeof ctx.get === 'function' ? ctx.get('sidebarRight') : undefined)],
+      ]
+      for (const [via, read] of probes) {
+        let value
+        try {
+          value = read()
+        } catch {
+          // 没声明 inject 的 ctx 读属性会抛，换下一条路
+          continue
+        }
+        const controller = readable(value)
+        if (controller === undefined) continue
+        if (sidebarProbe === '') {
+          sidebarProbe = `${via}${typeof controller.openResource === 'function' ? '' : ':no-openResource'}`
+        }
+        return controller
+      }
+      return undefined
+    }
+
     /**
      * 本插件在某个会话里开着几个 tab：只用于自报（client.json 里看得见），
      * 侧栏没这个能力时返回 undefined，不硬凑数字。
@@ -1153,7 +1200,44 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** 轮末投影的 kind。 */
+    /**
+     * 把右栏里本插件的 tab 点一遍名报上去：认得出表的写 id，认不出的写「空壳」。
+     *
+     * 页面 tab（老侧栏、或哪张卡没带上 id 时开的）刷新后导航参数就丢了，
+     * contentId 又是个随机地址——这种「空壳」tab 正是「不管怎么打开都是
+     * 最后一个表格」的窝点。报出来，client.json 里看得清谁在。
+     * @param {any} controller - sidebarRight 控制器。
+     * @param {string} sessionId - 会话 id。
+     * @returns {void}
+     */
+    function reportInventory(controller, sessionId) {
+      try {
+        if (typeof controller?.tabsIn !== 'function') return
+        if (typeof sessionId !== 'string' || sessionId === '') return
+        const mine = (controller.tabsIn(sessionId) ?? []).filter((tab) => tab?.kind === TAB_KIND)
+        if (mine.length === 0) return
+        report('tab-inventory', {
+          count: mine.length,
+          note: mine.map((tab) => docIdOfAddress(tab?.contentId) || '空壳').join(','),
+        })
+      } catch {
+        /* 点不出名不碍事 */
+      }
+    }
+
+    /**
+     * 哪些 tab 是「空壳」：本插件的种类，可 contentId 不是资源地址——认不出是
+     * 哪张表。老版本开的页面 tab 刷新后导航参数丢了，就成了这种空壳。
+     * @param {any[]} tabs - 右栏里的 tab 记录。
+     * @returns {any[]} 空壳 tab（原样返回，供关闭用）。
+     */
+    function shellTabsOf(tabs) {
+      if (!Array.isArray(tabs)) return []
+      return tabs.filter((tab) => tab?.kind === TAB_KIND && docIdOfAddress(tab?.contentId) === '')
+    }
+
+    /**
+     * 轮末投影的 kind。 */
     const TABLES_KIND = 'table-studio'
     /** 轮末投影已画过的 callId：工具卡据此退成一行，同一张表不该出现两次。 */
     const tailRendered = new Set()
@@ -1644,22 +1728,67 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 轮末投影：把本轮 `table_render` / `table_open` 的参数攒成卡片。
+     * 一条 `tool/result` 事件的 callId；取不到是空串。
+     * @param {any} event - 会话事件。
+     * @returns {string} callId。
+     */
+    function resultCallIdOf(event) {
+      const callId = event?.data?.message?.source?.callId
+      return typeof callId === 'string' ? callId : ''
+    }
+
+    /**
+     * 事件的 turn（投影的 key）；不是数就给空串——
+     * 否则 `String(undefined)` 会造出一个 'undefined' 投影来。
+     * @param {any} event - 会话事件。
+     * @returns {string} turn。
+     */
+    function turnIdOf(event) {
+      const turn = event?.data?.turn
+      return typeof turn === 'string' || typeof turn === 'number' ? String(turn) : ''
+    }
+
+    /**
+     * 把结果文本里的表 id 回填进轮末卡。
      *
-     * 为什么不靠工具结果：`tool/call` 事件带 `arguments`，回放与冷启动都能重画；
-     * 结果事件里只有一行给人看的文字。
+     * 轮末卡由 `tool/call` 的参数拼成：数据齐全，却没有 id——id 是 host 生成的，
+     * 只出现在结果文本里。缺了 id，卡上「在画布里编辑」只能传 `docId: ''`，
+     * opener 退成页面 tab，面板再按「会话当前表」认表：多张表时，点哪张都开
+     * 最后渲染那一张。宿主自带的 deliverables 投影正是这么接 `tool/result` 的。
+     * @param {any} state - 投影状态。
+     * @param {any} event - `tool/result` 事件。
+     * @returns {any} 新状态；没有可填的卡就原样返回。
+     */
+    function backfillCardId(state, event) {
+      const cards = Array.isArray(state?.cards) ? state.cards : []
+      if (cards.length === 0) return state
+      const callId = resultCallIdOf(event)
+      if (callId === '') return state
+      const target = cards.find((card) => card?.callId === callId)
+      // 已经有 id 的卡不碰：结果可能重放，别把好数据搅乱。
+      if (target === undefined || target.id !== '') return state
+      const id = cardData({ content: event?.data?.message?.content }).id
+      if (id === '') return state
+      return { ...state, cards: cards.map((card) => (card.callId === callId ? { ...card, id } : card)) }
+    }
+
+    /**
+     * 轮末投影：把本轮 `table_render` / `table_open` 攒成卡片。
+     *
+     * 数据走 `tool/call` 的 `arguments`（回放与冷启动都重画得出来）；表 id 另接
+     * `tool/result` 回填，见 {@link backfillCardId}。
      */
     const tablesDefinition = {
       kind: TABLES_KIND,
-      /**
-       * @param {any} event - 一条 session 事件。
-       * @returns {{id: string, role: string} | null} 投影匹配。
-       */
       match(event) {
         if (event === null || typeof event !== 'object') return null
         if (event.type === 'turn/start') return { id: String(event.data?.turn), role: 'start' }
         if (event.type === 'tool/call' && (event.data?.name === 'table_render' || event.data?.name === 'table_open')) {
           return { id: String(event.data?.turn), role: 'update' }
+        }
+        // 结果事件：只接带 callId、且 turn 是个数的，别给投影造出 'undefined' 键。
+        if (event.type === 'tool/result' && resultCallIdOf(event) !== '' && turnIdOf(event) !== '') {
+          return { id: turnIdOf(event), role: 'update' }
         }
         return null
       },
@@ -1678,7 +1807,9 @@ window.__ModuleLoader__.load({
        */
       update(context, matched) {
         const event = matched?.event
-        if (event === null || typeof event !== 'object' || event.type !== 'tool/call') return context.state
+        if (event === null || typeof event !== 'object') return context.state
+        if (event.type === 'tool/result') return backfillCardId(context.state, event)
+        if (event.type !== 'tool/call') return context.state
         const callId = String(event.data?.callId ?? '')
         if (callId === '') return context.state
         let args = null
@@ -1777,6 +1908,22 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 面板认表：先看导航参数，再看 tab 的资源地址。
+     *
+     * 两样都没有，就是「这个入口没指名表」——老实报 empty。早年这里还会退一步
+     * 去读「会话当前表」，那永远是最后渲染的一张：于是官人「不管怎么打开，
+     * 显示的都是最后一个表格的内容」。宁可说不知道，也不拿最后一张顶替。
+     * @param {any} params - 导航参数。
+     * @param {string} contentId - tab 的 contentId。
+     * @returns {{docId: string, phase: 'ready' | 'empty'}} 认表结果。
+     */
+    function resolvePanelDoc(params, contentId) {
+      const fromParams = typeof params?.docId === 'string' && params.docId !== '' ? params.docId : ''
+      const docId = fromParams !== '' ? fromParams : docIdOfAddress(contentId)
+      return docId === '' ? { docId: '', phase: 'empty' } : { docId, phase: 'ready' }
+    }
+
+    /**
      * 面板 body：一个 iframe，里面是本地绑定的编辑器。
      * @param {any} props - 槽 props。
      * @returns {any} React 节点。
@@ -1789,55 +1936,23 @@ window.__ModuleLoader__.load({
       // useTabInfo 是 hook（slot 的 hookContext），必须在组件顶层直接调，
       // 塞进 useMemo 里会被 React 当成「条件调用 hook」，轻则顺序错乱、重则整块不渲染。
       const params = tabParams(props)
-      // 参数对象每帧都是新的（slot 的 hook 返回值不稳定），所以只把里面那个
+      // 参数对象每帧都是新的（slot 的 hook 返回值不稳定），所以只把里面那两个
       // 字符串提出来当依赖——否则 effect 每帧重跑，setPhase 又把帧数推上去，成环。
       //
-      // 表 id 有三条来路，按可信度排：导航参数（刚打开）、tab 的资源地址（刷新后
-      // 参数丢了、contentId 还在）、会话当前表（guide 入口那种没指名表的情况）。
+      // 表 id 有两条来路：导航参数（刚打开）、tab 的资源地址（刷新后参数丢了、
+      // contentId 还在）。都没有就是这个 tab 没指名表，见 {@link resolvePanelDoc}。
       const tabContentId = typeof tabInfo?.tab?.contentId === 'string' ? tabInfo.tab.contentId : ''
-      const paramDocId = typeof params?.docId === 'string' && params.docId !== ''
-        ? params.docId
-        : docIdOfAddress(tabContentId)
-      const [docId, setDocId] = useState(paramDocId)
+      const panel = resolvePanelDoc(params, tabContentId)
+      const [docId, setDocId] = useState(panel.docId)
       const [phase, setPhase] = useState('loading')
       const [error, setError] = useState('')
       const frameRef = useRef(null)
 
       useEffect(() => {
-        if (paramDocId !== '') {
-          setDocId(paramDocId)
-          setPhase('ready')
-          return undefined
-        }
-        if (sessionId === '') {
-          setPhase('empty')
-          return undefined
-        }
-        let alive = true
-        setPhase('loading')
-        api(`/session?sessionId=${encodeURIComponent(sessionId)}`)
-          .then((result) => {
-            if (!alive) return
-            const id = typeof result?.id === 'string' ? result.id : ''
-            if (id !== '') {
-              setDocId(id)
-              setPhase('ready')
-              setError('')
-            } else {
-              setPhase('empty')
-            }
-          })
-          .catch((failure) => {
-            if (!alive) return
-            const message = String(failure?.message ?? failure)
-            setError(message)
-            setPhase('empty')
-            report('panel-error', { note: `session:${message}`.slice(0, 160) })
-          })
-        return () => {
-          alive = false
-        }
-      }, [paramDocId, sessionId])
+        setDocId(panel.docId)
+        setPhase(panel.phase)
+        return undefined
+      }, [panel.docId, panel.phase])
 
       useEffect(() => {
         if (phase !== 'ready') return undefined
@@ -1931,9 +2046,14 @@ window.__ModuleLoader__.load({
         return h('div', { className: 'tst-pane' }, h('div', { className: 'tst-pane-empty' }, '正在载入表格…'))
       }
       if (phase === 'empty' || docId === '') {
+        // 认不出表时把话说明白：是这个入口没指名，而不是会话里没有表。
+        // 早先这里会拿「会话当前表」顶着，看着像能编辑，其实永远是最后一张。
+        const hint = panel.docId === ''
+          ? '这个入口没指定是哪张表：点某张表卡上的「在画布里编辑」，或在这里新建一张。'
+          : (error !== '' ? `还没有可编辑的表（${error}）` : '本会话还没有表：先让模型 table_render 一张，或在这里新建。')
         return h('div', { className: 'tst-pane' },
           h('div', { className: 'tst-pane-empty' },
-            h('span', null, error !== '' ? `还没有可编辑的表（${error}）` : '本会话还没有表：先让模型 table_render 一张，或在这里新建。'),
+            h('span', null, hint),
             h('button', { className: 'tst-pane-btn', type: 'button', onClick: createEmpty }, '新建空表'),
           ),
         )
@@ -1955,12 +2075,22 @@ window.__ModuleLoader__.load({
       // 表名先从内存缓存取（卡片打开时记过），取不到再问 host 一次。
       const tabInfo = typeof props?.useTabInfo === 'function' ? props.useTabInfo() : null
       const contentId = typeof tabInfo?.tab?.contentId === 'string' ? tabInfo.tab.contentId : ''
-      const docId = docIdOfAddress(contentId)
-      const [name, setName] = useState(() => docTitles.get(docId) ?? '')
+      // 两条认表的路：资源 tab 读 contentId；页面 tab（宿主没有 openResource，
+      // 靠 multiple 撑开的那种）contentId 是随机地址，只能读自己这次导航的参数。
+      const navParams = tabInfo?.tab?.navigation?.params
+      const paramDocId = typeof navParams?.docId === 'string' ? navParams.docId : ''
+      const paramTitle = typeof navParams?.title === 'string' ? navParams.title : ''
+      const docId = docIdOfAddress(contentId) !== '' ? docIdOfAddress(contentId) : paramDocId
+      const [name, setName] = useState(() => docTitles.get(docId) ?? paramTitle)
       useEffect(() => {
         if (docId === '') return undefined
         if (docTitles.has(docId)) {
           setName(docTitles.get(docId))
+          return undefined
+        }
+        if (paramTitle !== '') {
+          rememberDocTitle(docId, paramTitle)
+          setName(paramTitle)
           return undefined
         }
         let alive = true
@@ -1978,7 +2108,7 @@ window.__ModuleLoader__.load({
         return () => {
           alive = false
         }
-      }, [docId])
+      }, [docId, paramTitle])
       const label = typeof name === 'string' && name !== '' ? name : '表格'
       return h('span', { className: 'tst-tab-title', title: label }, label)
     }
@@ -1999,10 +2129,14 @@ window.__ModuleLoader__.load({
     function makeOpener(ctx, sessionId) {
       const mine = typeof sessionId === 'string' ? sessionId : ''
       return (params) => {
-        const controller = ctx?.get?.('sidebarRight')
+        const controller = sidebarOf(ctx)
         if (!controller) {
           report('open-tab', { note: 'no-sidebarRight' })
           return false
+        }
+        if (!sidebarProbeSent && sidebarProbe !== '') {
+          sidebarProbeSent = true
+          report('sidebar-probe', { note: sidebarProbe })
         }
         const docId = typeof params?.docId === 'string' ? params.docId : ''
         rememberDocTitle(docId, typeof params?.title === 'string' ? params.title : '')
@@ -2017,7 +2151,8 @@ window.__ModuleLoader__.load({
         // ① 资源地址：一表一 tab
         if (docId !== '' && typeof controller.openResource === 'function') {
           const address = addressOfDoc(docId)
-          const resourceOptions = { params: { docId } }
+          const docTitle = typeof params?.title === 'string' ? params.title : ''
+          const resourceOptions = { params: docTitle === '' ? { docId } : { docId, title: docTitle } }
           try {
             if (mine !== '' && mounted !== undefined && mounted !== mine && typeof controller.openResourceIn === 'function') {
               controller.openResourceIn(mine, address, resourceOptions)
@@ -2026,17 +2161,22 @@ window.__ModuleLoader__.load({
             }
             controller.openResource(address, resourceOptions)
             report('open-tab', { note: `openResource:${address}`, id: docId, count: tabCountOf(controller, mine) })
+            reportInventory(controller, mine)
             return true
           } catch (error) {
             // 类型没认领这个地址（老侧栏 / 注册失败）时退回页面 tab，别把入口弄死。
             report('open-tab', { note: `resource-threw:${String(error?.message ?? error).slice(0, 100)}` })
           }
         }
-        // ② 页面 tab：老侧栏，或没有 docId（guide 入口 / 会话当前表）
+        // ② 页面 tab：老侧栏，或没有 docId（guide 入口那种没指名表的情况）
+        //
+        // 没有 docId 却走到这儿，多半是哪张卡没带上表 id。面板不会再拿「会话当前表」
+        // 顶着（见 resolvePanelDoc），只会老实说这个入口没指名——单记一条，看得见。
         try {
           if (mine !== '' && mounted !== undefined && mounted === mine && typeof controller.openTab === 'function') {
             controller.openTab(TAB_KIND, options)
-            report('open-tab', { note: 'openTab-mine' })
+            report('open-tab', { note: docId === '' ? 'openTab-no-docId' : 'openTab-mine' })
+            reportInventory(controller, mine)
             return true
           }
           if (mine !== '' && typeof controller.openTabIn === 'function') {
@@ -2084,9 +2224,15 @@ window.__ModuleLoader__.load({
       //
       // `patterns` 把本类型挂到资源地址上（一表一地址、一表一 tab）；`title` 是同步
       // 接口，表名从卡片打开时记下的缓存里取，认不出就退「表格」，标题槽再异步补全。
+      //
+      // `multiple: true` 是兜底：宿主若只肯给页面 tab（`openResource` 不可用，见
+      // {@link sidebarOf} 那条约定的坑），页面 tab 默认「一个 kind 一个 pane 只有一个」，
+      // 多张表就会互相顶替。开了 multiple，每次 openTab 都自成一条内容，
+      // 配合标题槽从导航参数里认表，多张表才真的能并排。
       ctx.effect(() => ctx.sidebarRightTabs.register({
         id: TAB_ID,
         kind: TAB_KIND,
+        multiple: true,
         priority: 'extension',
         patterns: [`${TAB_SCHEME}/**`],
         title: (address) => tabTitleOf(address),
@@ -2123,6 +2269,43 @@ window.__ModuleLoader__.load({
 
       // ④¼ 自报家门：host 侧据此判断「页面跑的是哪一版」。
       report('apply')
+
+      // ④¼½ 右栏里本插件的 tab 点一遍名，顺手扫掉「空壳」。
+      //
+      // 空壳 = 本插件种类、可 contentId 不是资源地址的 tab（见 {@link shellTabsOf}）：
+      // 老版本开的页面 tab，刷新后导航参数丢了、地址又是随机的，认不出是哪张表。
+      // 这种 tab 早先会拿「会话当前表」顶着——那永远是最后渲染的一张，正是官人
+      // 「不管怎么打开，显示的都是最后一个表格」的窝点；如今面板不肯顶了，留着
+      // 也只是碍眼，遂一并扫掉。guide 入口开的也是这种 tab：扫了下一回点 guide
+      // 再开便是，表本身存在 host 侧，丢不了。
+      ctx.effect(() => {
+        const sweep = () => {
+          const controller = sidebarOf(ctx)
+          if (controller === undefined || typeof controller.tabsIn !== 'function') return
+          const sessionId = typeof controller.mounted?.getSnapshot === 'function' ? controller.mounted.getSnapshot() : ''
+          if (typeof sessionId !== 'string' || sessionId === '') return
+          let mine = []
+          try {
+            mine = controller.tabsIn(sessionId) ?? []
+          } catch {
+            return
+          }
+          const shells = shellTabsOf(mine)
+          if (shells.length > 0 && typeof controller.closeIn === 'function') {
+            for (const tab of shells) {
+              try {
+                controller.closeIn(sessionId, tab.id)
+              } catch {
+                /* 关不掉的留下，下一轮再扫 */
+              }
+            }
+          }
+          reportInventory(controller, sessionId)
+        }
+        // 晚一拍再扫：等会话的 store 被认领，tab 也从持久化里还原完。
+        const timer = setTimeout(sweep, 1500)
+        return () => clearTimeout(timer)
+      }, 'table-studio: tab inventory')
 
       // ④½ 未捕获异常留痕：只在栈里出现本插件时上报，别替别的插件背锅。
       ctx.effect(() => {
@@ -2220,9 +2403,16 @@ window.__ModuleLoader__.load({
         saveFileSilently,
         savedHint,
         makeOpener,
+        sidebarOf,
         addressOfDoc,
         docIdOfAddress,
         tabTitleOf,
+        resolvePanelDoc,
+        reportInventory,
+        shellTabsOf,
+        resultCallIdOf,
+        turnIdOf,
+        backfillCardId,
         rememberDocTitle,
         tabCountOf,
         docTitles,

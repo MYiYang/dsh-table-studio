@@ -1,6 +1,6 @@
 {
   "name": "dsh-table-studio",
-  "version": "0.5.10",
+  "version": "0.5.13",
   "description": "Table studio for DeepSeek Harness: a conversation table card (copy / CSV download / expand) plus a right-side Excel-style spreadsheet editor bound locally to fortune-sheet (toolbar, formula bar, sheet tabs) with a jspreadsheet fallback, downloads saved straight to the default Downloads folder — no CDN, everything shipped in the package.",
   "type": "module",
   "main": "index.js",

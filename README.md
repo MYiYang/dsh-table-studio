@@ -152,6 +152,67 @@ m.splice.apply(m, [l, 0].concat(Xt.map(function (x) { return JSON.parse(x) })))
 `test/fortune.csp.test.js` 守着这条线：包里出现 `new Function(` / `eval(` 就红，谁把 vendor 换成新构建都会
 被拦住。另外编辑器自己也接管了插入菜单项（见下），这样「向上/向下」与 Excel 一致，不再差一行。
 
+### 「不管怎么打开，都是最后一个表格的内容」（0.5.13 已修）
+
+**症状**：右栏几个 tab，点哪个都是最后渲染那张表的内容；tab 标题却对不上内容。
+
+**真因**（`tab-inventory` 自检照出来的原形）：右栏里 6 个 tab，其中 **3 个是「空壳」**——
+本插件的种类，可 `contentId` 不是资源地址。它们是 0.5.12 之前那次Bug开出来的**页面 tab**：
+刷新后导航参数丢了、地址又是随机的，面板认不出是哪张表，便退而去读「会话当前表」——
+那永远是最后渲染的一张。于是点哪个空壳，都是同一张表。
+
+**修法**：
+
+- 面板认表只认两样——导航参数、tab 的资源地址。两样都没有就老实报「这个入口没指定是
+  哪张表」，附「新建空表」；**不再拿会话当前表顶替**（`resolvePanelDoc`）。
+- 启动时把空壳 tab 扫掉（`shellTabsOf` + `closeIn`）：老Bug留下的、认不出表的，留着只是
+  碍眼。guide 入口开的也是这种 tab，扫了下回点 guide 再开便是，表在 host 侧丢不了。
+- 自检文件增记 `tab-inventory`：本插件每个 tab 一行，认得出表的写 id，认不出的写「空壳」，
+  启动时与每次开 tab 后各报一次。
+
+**验收**：`~/.dsh/table-studio/client.json` 里 `last.tab-inventory` 应为
+`tbl_…,tbl_…,tbl_…`（count 3），不再有「空壳」；开 tab 走 `openResource` 资源地址。
+
+### 点哪张表的「在画布里编辑」，开的都是最后一张（0.5.12 已修）
+
+**症状**：正文里那些表格卡，点「放大 → 在画布里编辑」，右栏开出来的永远是本轮最后渲染的那张表；
+tab 标题却是对的——内容对不上标题。
+
+**真因**：同一张表有两份卡。挂在工具调用下面那份从**结果文本**解出表 id；正文里那份（轮末投影）
+只吃 `tool/call` 的 `arguments`——数据齐全，可 id 是 host 生成的、只出现在结果文本里，所以它
+**没有 id**。而工具卡一旦被轮末画过就塌成一行「已渲染在下方」，压根点不到。于是唯一可点的入口
+传的是 `docId: ''`：opener 取不到资源地址，退成页面 tab；面板没有参数可依，按「会话当前表」认表
+——那永远是最后渲染的一张。
+
+**修法**：轮末投影增接 `tool/result` 事件（`message.source.callId` 对卡片、`message.content` 解 id），
+把表 id 回填进卡片——宿主自带的 deliverables 投影正是这么接的。另外走页面 tab 又没带 docId 时，
+自检文件记一条 `openTab-no-docId`，下次一眼可辨，不必再靠倒推。
+
+**验收**（A/B 实测，非推断）：`git stash` 撤掉改动重载，4 条轮末卡的 `card` 事件 id 全为空串；
+恢复后 8 条 `card` 事件 id 无一为空。`~/.dsh/table-studio/client.json` 里按时间戳可复看。
+
+### 一表一 tab 其实没生效：开多张表只留最后一张（0.5.11 已修）
+
+**症状**：连开两张表，右栏永远只剩最后点的那张；tab 标题一律写「表格」。
+
+**真因**：0.5.10 的 opener 用 `ctx.get('sidebarRight')` 取控制器。这条路拿回来的对象带 `openTab` /
+`mounted`，却**没有** `openResource`——于是「资源地址」那一支从来没走到，每次都退成页面 tab；而页面 tab
+的规矩是「一个 kind 在一个窗格里只有一个」，后点的就把先点的顶掉。标题一直是「表格」也是同一个信号：
+标题本是从资源地址反解表名的，页面地址解不出来。
+
+**修法**：
+
+- 控制器先读 `ctx.sidebarRight`（内置插件都这么取，拿到的是完整控制器），`ctx.reflect.get` 次之，
+  `ctx.get` 只作兜底；走的是哪条、有没有 `openResource`，都往 `client.json` 记一条 `sidebar-probe`，
+  事后查得出来。
+- tab 类型补 `multiple: true`：万一宿主真只给页面 tab，每次 `openTab` 也自成一条内容，不再彼此顶替。
+- 标题槽除了按 `contentId` 认表，也从本次导航的 `params.docId` / `params.title` 认——页面 tab 的地址
+  是随机的，光看地址认不出表。
+- 开资源 tab 时把 `title` 一并塞进 `params`，标题槽无须再问一次 host。
+
+**验收**：连开两张表，`~/.dsh/table-studio/client.json` 里应出现 `sidebar-probe: prop`、两条
+`openResource:dsh-resource://dsh-table-studio/…`，`count` 由 1 长到 2；右栏并排两个 tab，标题各是表名。
+
 ### 多表挤成一个 tab、宽表看不到滚动条（0.5.10 已修）
 
 **1）几张表只有一个 tab。** 右栏的 tab 类型原先注册成「页面类型」：一个窗格里页面只认一个，再开

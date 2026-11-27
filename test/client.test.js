@@ -219,6 +219,7 @@ test('apply 注册四处界面', () => {
   assert.equal(tabTypes.length, 1)
   assert.equal(tabTypes[0].kind, internals.TAB_KIND)
   assert.equal(tabTypes[0].priority, 'extension')
+  assert.equal(tabTypes[0].multiple, true, 'multiple 必须开：否则宿主只给页面 tab 时，多张表会互相顶掉')
   const keys = records.filter((record) => record.descriptor.name === 'tool.call.toolview').map((record) => record.descriptor.key).sort()
   assert.deepEqual(plain(keys), ['table_open', 'table_render', 'table_update'])
   const panes = records.filter((record) => record.descriptor.name === 'sidebar.right.pane.tab')
@@ -276,7 +277,7 @@ test('opener 带 docId 时走资源地址：一表一 tab', () => {
   }
   const opener = internals.makeOpener({ get: () => controller }, 'session-a')
   assert.equal(opener({ docId: 'tbl_1', title: '处罚明细' }), true)
-  assert.deepEqual(plain(calls), ['expand', 'openResource:dsh-resource://dsh-table-studio/tbl_1:{"docId":"tbl_1"}'])
+  assert.deepEqual(plain(calls), ['expand', 'openResource:dsh-resource://dsh-table-studio/tbl_1:{"docId":"tbl_1","title":"处罚明细"}'])
   assert.equal(internals.tabTitleOf('dsh-resource://dsh-table-studio/tbl_1'), '处罚明细')
 })
 
@@ -294,6 +295,36 @@ test('opener 两次打开同一张表仍是同一个地址', () => {
     'dsh-resource://dsh-table-studio/tbl_same',
     'dsh-resource://dsh-table-studio/tbl_same',
   ])
+})
+
+test('opener 优先直读 ctx.sidebarRight：门面只给页面 tab 时也不退化成单 tab', () => {
+  const calls = []
+  const facade = { openTab(kind) { calls.push(`facade:${kind}`) } }
+  const controller = {
+    mounted: { getSnapshot: () => 'session-a' },
+    openResource(address) { calls.push(`openResource:${address}`) },
+    openTab(kind) { calls.push(`openTab:${kind}`) },
+  }
+  const opener = internals.makeOpener({ sidebarRight: controller, get: () => facade }, 'session-a')
+  assert.equal(opener({ docId: 'tbl_a', title: '甲表' }), true)
+  assert.deepEqual(plain(calls), ['openResource:dsh-resource://dsh-table-studio/tbl_a'])
+})
+
+test('sidebarOf：属性优先，其次 reflect.get，最后才是 ctx.get', () => {
+  const prop = { openTab() {} }
+  const reflect = { openTab() {} }
+  const legacy = { openTab() {} }
+  assert.equal(internals.sidebarOf({ sidebarRight: prop, reflect: { get: () => reflect }, get: () => legacy }), prop)
+  assert.equal(internals.sidebarOf({ reflect: { get: () => reflect }, get: () => legacy }), reflect)
+  assert.equal(internals.sidebarOf({ get: () => legacy }), legacy)
+  assert.equal(internals.sidebarOf({}), undefined)
+  assert.equal(internals.sidebarOf(null), undefined)
+  // 读属性会抛的 ctx（没声明 inject）不该把整条路堵死
+  const throwing = {
+    get sidebarRight() { throw new Error('service not injected') },
+    get: () => legacy,
+  }
+  assert.equal(internals.sidebarOf(throwing), legacy)
 })
 
 test('opener 两张不同的表开出两个地址', () => {
@@ -366,6 +397,25 @@ test('TabTitle 用表名，认不出表时退「表格」', () => {
   assert.equal(bare.props.children, '表格')
 })
 
+test('TabTitle 从导航参数认表：页面 tab（随机地址）也写得清表名', () => {
+  const pageTab = {
+    useTabInfo: () => ({
+      tab: {
+        contentId: 'sidebar://table-studio-editor/3f2a-1b4c',
+        navigation: { params: { docId: 'tbl_nav', title: '处罚明细' } },
+      },
+    }),
+  }
+  const node = internals.TabTitle(pageTab)
+  assert.equal(node.props.children, '处罚明细')
+  // 认出的表名进缓存那一步在 effect 里，假 React 不跑 effect，故只验渲染结果
+  // 导航参数里没有表名时仍退「表格」，不把随机地址当名字
+  const nameless = internals.TabTitle({
+    useTabInfo: () => ({ tab: { contentId: 'sidebar://table-studio-editor/9a8b', navigation: { params: { docId: 'tbl_nameless' } } } }),
+  })
+  assert.equal(nameless.props.children, '表格')
+})
+
 test('宽表靠表体横向滚动，列不再压成省略号', () => {
   const css = internals.CSS
   assert.match(css, /\.tst-body \{[\s\S]*?overflow: auto/)
@@ -421,6 +471,165 @@ test('轮末投影：坏 JSON 与空参数都跳过', () => {
   assert.equal(definition.update({ state }, { event: { type: 'tool/call', data: { callId: 'x', arguments: '{坏' } } }), state)
   assert.equal(definition.update({ state }, { event: { type: 'tool/call', data: { callId: '', arguments: '{}' } } }), state)
   assert.equal(definition.update({ state }, { event: { type: 'tool/call', data: { callId: 'y', arguments: '{}' } } }), state)
+})
+
+test('轮末投影：match 认 tool/result，没 callId 或不认', () => {
+  const definition = internals.tablesDefinition
+  const ok = definition.match({ type: 'tool/result', data: { turn: 7, message: { source: { callId: 'c1' } } } })
+  assert.deepEqual(plain(ok), { id: '7', role: 'update' })
+  // turn 不是数就别接：否则投影会多出一个 'undefined' 键
+  assert.equal(definition.match({ type: 'tool/result', data: { message: { source: { callId: 'c1' } } } }), null)
+  assert.equal(definition.match({ type: 'tool/result', data: { turn: 7, message: {} } }), null)
+  assert.equal(definition.match({ type: 'tool/result', data: { turn: 7 } }), null)
+  assert.equal(definition.match({ type: 'tool/result' }), null)
+})
+
+test('轮末投影：tool/result 把表 id 回填进卡，点得动「在画布里编辑」', () => {
+  const definition = internals.tablesDefinition
+  const started = definition.start({}, { event: { type: 'turn/start', data: { turn: 7 } } })
+  let state = definition.update({ state: started }, {
+    event: {
+      type: 'tool/call', data: {
+        turn: 7, callId: 'call-1', name: 'table_render',
+        arguments: JSON.stringify({ title: '甲表', columns: ['a', 'b'], rows: [['1', '2']] }),
+      },
+    },
+  })
+  assert.equal(state.cards.length, 1)
+  assert.equal(state.cards[0].id, '', '只有参数时本来没有 id')
+  assert.equal(state.cards[0].data !== null, true)
+  state = definition.update({ state }, {
+    event: {
+      type: 'tool/result', data: {
+        turn: 7,
+        message: {
+          source: { callId: 'call-1' },
+          content: [{ type: 'text', text: '「甲表」 · 2 列 × 1 行 · id tbl_20261127_aaaaaa' }],
+        },
+      },
+    },
+  })
+  assert.equal(state.cards.length, 1)
+  assert.equal(state.cards[0].id, 'tbl_20261127_aaaaaa')
+  assert.deepEqual(plain(state.cards[0].data.rows), [['1', '2']], '回填 id 不许动数据')
+  // 结果重放不该把已有 id 的卡再搅一遍
+  const again = definition.update({ state }, {
+    event: {
+      type: 'tool/result', data: {
+        turn: 7,
+        message: { source: { callId: 'call-1' }, content: [{ type: 'text', text: 'id tbl_20261127_bbbbbb' }] },
+      },
+    },
+  })
+  assert.equal(again.cards[0].id, 'tbl_20261127_aaaaaa')
+})
+
+test('轮末投影：tool/result 只填自己那些卡', () => {
+  const definition = internals.tablesDefinition
+  const state = { turn: 7, cards: [{ callId: 'call-1', id: '', title: '甲表', note: '', data: { columns: ['a'], rows: [['1']] } }] }
+  const untouched = definition.update({ state }, {
+    event: {
+      type: 'tool/result', data: {
+        turn: 7,
+        message: { source: { callId: '别的调用' }, content: [{ type: 'text', text: 'id tbl_20261127_zzzzzz' }] },
+      },
+    },
+  })
+  assert.equal(untouched, state, 'callId 对不上的结果不该碰这张卡')
+  const noId = definition.update({ state }, {
+    event: {
+      type: 'tool/result', data: {
+        turn: 7,
+        message: { source: { callId: 'call-1' }, content: [{ type: 'text', text: '没带 id 的一句话' }] },
+      },
+    },
+  })
+  assert.equal(noId.cards[0].id, '', '结果里没有 id 就留着空，别瞎编')
+})
+
+test('轮末卡把表 id 传给 TableCardView：点放大后开得出对应表', () => {
+  const cards = [{
+    callId: 'c1', id: 'tbl_20261127_aaaaaa', title: '甲表', note: '',
+    data: { columns: ['a'], rows: [['1']] },
+  }]
+  const node = internals.TablesTail({ sessionId: 'session-a', turn: { data: { get: () => ({ cards }) } } })
+  const item = node.props.children[0]
+  const view = item.props.children
+  assert.equal(view.props.id, 'tbl_20261127_aaaaaa')
+  assert.equal(view.props.title, '甲表')
+  assert.equal(typeof view.props.openEditor, 'function')
+})
+
+test('resolvePanelDoc：认表只认参数与资源地址，不拿会话当前表顶替', () => {
+  const resolve = internals.resolvePanelDoc
+  // 导航参数最可信
+  assert.deepEqual(plain(resolve({ docId: 'tbl_a' }, 'sidebar://table-studio-editor/3f2a')), { docId: 'tbl_a', phase: 'ready' })
+  // 参数空了（刷新后）就靠 tab 的资源地址
+  assert.deepEqual(plain(resolve({}, 'dsh-resource://dsh-table-studio/tbl_b')), { docId: 'tbl_b', phase: 'ready' })
+  assert.deepEqual(plain(resolve(undefined, 'dsh-resource://dsh-table-studio/tbl_b')), { docId: 'tbl_b', phase: 'ready' })
+  // 两样都没有：老实说不知道，绝不退回「会话当前表」——那永远是最后渲染的一张
+  assert.deepEqual(plain(resolve({}, 'sidebar://table-studio-editor/9a8b')), { docId: '', phase: 'empty' })
+  assert.deepEqual(plain(resolve({ title: '某张表' }, '')), { docId: '', phase: 'empty' })
+  assert.deepEqual(plain(resolve(undefined, '')), { docId: '', phase: 'empty' })
+  // 参数里 docId 是空串时也不该当成有
+  assert.deepEqual(plain(resolve({ docId: '' }, 'dsh-resource://dsh-table-studio/tbl_c')), { docId: 'tbl_c', phase: 'ready' })
+})
+
+test('reportInventory：资源 tab 报 id，页面 tab 报空壳', () => {
+  const seen = []
+  const controller = {
+    tabsIn: () => [
+      { kind: internals.TAB_KIND, contentId: 'dsh-resource://dsh-table-studio/tbl_a' },
+      { kind: internals.TAB_KIND, contentId: 'sidebar://table-studio-editor/3f2a' },
+      { kind: '别的插件', contentId: 'whatever' },
+    ],
+  }
+  // report 走的是 vm 里那个 fetch，得把 vm 上下文里的换掉才拦得到。
+  const original = context.fetch
+  context.fetch = async (_url, options) => {
+    seen.push(JSON.parse(String(options?.body ?? '{}')))
+    return { ok: true, json: async () => ({ ok: true }) }
+  }
+  try {
+    internals.reportInventory(controller, 'session-a')
+  } finally {
+    context.fetch = original
+  }
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].kind, 'tab-inventory')
+  assert.equal(seen[0].count, 2)
+  assert.equal(seen[0].note, 'tbl_a,空壳')
+})
+
+test('reportInventory：没有自己的 tab 就不吭声', () => {
+  const seen = []
+  const original = context.fetch
+  context.fetch = async (_url, options) => {
+    seen.push(JSON.parse(String(options?.body ?? '{}')))
+    return { ok: true, json: async () => ({ ok: true }) }
+  }
+  try {
+    internals.reportInventory({ tabsIn: () => [] }, 'session-a')
+    internals.reportInventory({ tabsIn: () => [{ kind: '别的插件' }] }, 'session-a')
+    internals.reportInventory(undefined, 'session-a')
+    internals.reportInventory({ tabsIn: () => [{ kind: internals.TAB_KIND }] }, '')
+  } finally {
+    context.fetch = original
+  }
+  assert.equal(seen.length, 0)
+})
+
+test('shellTabsOf：只挑认不出表的空壳', () => {
+  const shells = internals.shellTabsOf([
+    { kind: internals.TAB_KIND, contentId: 'dsh-resource://dsh-table-studio/tbl_a' },
+    { kind: internals.TAB_KIND, contentId: 'sidebar://table-studio-editor/3f2a' },
+    { kind: internals.TAB_KIND, contentId: '' },
+    { kind: '别的插件', contentId: 'whatever' },
+  ])
+  assert.equal(shells.length, 2)
+  assert.deepEqual(plain(shells.map((tab) => tab.contentId)), ['sidebar://table-studio-editor/3f2a', ''])
+  assert.deepEqual(plain(internals.shellTabsOf(undefined)), [])
+  assert.deepEqual(plain(internals.shellTabsOf('不是数组')), [])
 })
 
 test('轮末投影：buildLocationData 挂到 turn 上', () => {
